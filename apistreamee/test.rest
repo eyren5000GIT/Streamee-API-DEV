@@ -1,0 +1,96 @@
+@baseUrl = http://127.0.0.1:8000
+@username = testuser_1
+@email = testuser_1@example.com
+@password = StrongPassword123!
+
+### =======================================================
+### =======================================================
+### AUTHENTICATE
+### =======================================================
+### =======================================================
+
+### -------------------------------------------------------
+### Register
+### -------------------------------------------------------
+POST {{baseUrl}}/auth/register/
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+### -------------------------------------------------------
+### Login (username + password)
+### -------------------------------------------------------
+# @name login
+POST {{baseUrl}}/auth/login/
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+### -------------------------------------------------------
+### Me
+### -------------------------------------------------------
+GET {{baseUrl}}/auth/me/
+Authorization: Bearer {{login.response.body.$.access}}
+
+### -------------------------------------------------------
+### Logout (Refresh blacklisten)
+### -------------------------------------------------------
+POST {{baseUrl}}/auth/logout/
+Authorization: Bearer {{login.response.body.$.access}}
+Content-Type: application/json
+
+{
+  "refresh": "{{login.response.body.$.refresh}}"
+}
+
+
+### =======================================================
+### =======================================================
+### COMMUNITIES
+### =======================================================
+### =======================================================
+
+### List communities
+GET {{baseUrl}}/communities/
+
+### Create community (bound to a unique Twitch streamer)
+POST {{baseUrl}}/communities/
+Authorization: Bearer {{login.response.body.$.access}}
+Content-Type: application/json
+
+{
+  "twitch": "https://twitch.tv/handofblood",
+  "description": "inoffiziell, bis claim"
+}
+
+### Get by slug (anpassen nach response)
+GET {{baseUrl}}/communities/slug/handofblood/
+
+### Patch by id (id aus create response)
+PATCH {{baseUrl}}/communities/1/
+Authorization: Bearer {{login.response.body.$.access}}
+Content-Type: application/json
+
+{
+  "description": "updated"
+}
+
+### Join community
+POST {{baseUrl}}/communities/1/join/
+Authorization: Bearer {{login.response.body.$.access}}
+
+### Leave community
+POST {{baseUrl}}/communities/1/leave/
+Authorization: Bearer {{login.response.body.$.access}}
+
+### Me communities
+GET {{baseUrl}}/me/communities/
+Authorization: Bearer {{login.response.body.$.access}}
+
