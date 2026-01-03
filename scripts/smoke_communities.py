@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Smoke test for Communities endpoints.
@@ -6,7 +7,10 @@ Behavior:
 - Runs all steps best-effort (does not stop on first failure).
 - Collects failures and prints a summary at the end.
 - Attempts CREATE community (may be skipped if Twitch not configured).
-- Subsequent tests use an EXISTING community first; if none exists, fallback to the created one.
+- Subsequent tests use an EXISTING community first:
+    1) Prefer the manually created community (default slug: "testcommunity")
+    2) Otherwise pick the first community from GET /communities/
+    3) Otherwise fallback to the created community (if available)
 - PATCH is attempted only on a community where the current user is admin; otherwise PATCH is skipped.
 - Generates a UNIQUE username + email per run to ensure fresh test data.
 """
@@ -54,6 +58,9 @@ class Config:
     timeout_s: int = 20
     smoke_twitch: str = "https://twitch.tv/handofblood"
 
+    # Preferred existing community slug (your manually created one)
+    testcommunity_slug: str = "testcommunity"
+
 
 class SmokeFail(RuntimeError):
     pass
@@ -80,7 +87,6 @@ def request_json(
         data = resp.json()
     except Exception:
         data = resp.text
-
     return resp.status_code, data
 
 
@@ -91,7 +97,11 @@ def auth_headers(token: str) -> Dict[str, str]:
 def is_twitch_not_configured(sc: int, data: Any) -> bool:
     if isinstance(data, dict):
         msg = _pretty(data).lower()
-        if "twitch" in msg and ("not configured" in msg or "missing twitch_client_id" in msg or "missing twitch_client_secret" in msg):
+        if "twitch" in msg and (
+            "not configured" in msg
+            or "missing twitch_client_id" in msg
+            or "missing twitch_client_secret" in msg
+        ):
             return True
         if "missing twitch_client_id" in msg or "missing twitch_client_secret" in msg:
             return True
@@ -163,7 +173,9 @@ def create_community(cfg: Config, token: str) -> Optional[Dict[str, Any]]:
         "description": f"smoke test create ({_rand_suffix(6)})",
         "name": f"Smoke Community {_rand_suffix(6)}",
     }
-    sc, data = request_json("POST", url, headers=auth_headers(token), json_body=payload, timeout_s=cfg.timeout_s)
+    sc, data = request_json(
+        "POST", url, headers=auth_headers(token), json_body=payload, timeout_s=cfg.timeout_s
+    )
 
     if sc == 201 and isinstance(data, dict) and "id" in data and "slug" in data:
         return data
@@ -185,7 +197,9 @@ def get_community_by_slug(cfg: Config, slug: str, token: str) -> Dict[str, Any]:
 def patch_community(cfg: Config, token: str, community_id: int) -> Dict[str, Any]:
     url = f"{cfg.base_url}/communities/{community_id}/"
     payload = {"description": "smoke test patched"}
-    sc, data = request_json("PATCH", url, headers=auth_headers(token), json_body=payload, timeout_s=cfg.timeout_s)
+    sc, data = request_json(
+        "PATCH", url, headers=auth_headers(token), json_body=payload, timeout_s=cfg.timeout_s
+    )
     if sc != 200:
         raise SmokeFail(f"PATCH /communities/{community_id}/ failed {sc}\n{_pretty(data)}")
     return data if isinstance(data, dict) else {"raw": data}
@@ -220,16 +234,48 @@ def me_communities(cfg: Config, token: str) -> Any:
 # -------------------------
 
 def pick_existing_community_from_list(list_data: Any) -> Optional[Dict[str, Any]]:
-    """
-    Prefer an existing community from GET /communities/.
-    We pick the first item with id+slug.
-    """
+    """Pick the first item with id+slug from GET /communities/."""
     if not isinstance(list_data, list):
         return None
     for c in list_data:
         if isinstance(c, dict) and c.get("id") is not None and c.get("slug"):
             return c
     return None
+
+
+def select_target_community(
+    cfg: Config,
+    token: str,
+    list_data: Any,
+    created: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Select community for the main flow (get/join/leave/me).
+
+    Priority:
+      1) Your manually created community by slug (cfg.testcommunity_slug)
+      2) First community from GET /communities/
+      3) Created community (if available)
+    """
+    # 1) testcommunity as preferred existing fallback target
+    if cfg.testcommunity_slug:
+        try:
+            detail = get_community_by_slug(cfg, cfg.testcommunity_slug, token)
+            if detail.get("id") and detail.get("slug"):
+                return {"id": detail["id"], "slug": detail["slug"]}, f"preferred slug '{cfg.testcommunity_slug}'"
+        except Exception:
+            pass
+
+    # 2) any existing community from list
+    existing = pick_existing_community_from_list(list_data)
+    if existing:
+        return {"id": existing.get("id"), "slug": existing.get("slug")}, "first existing from /communities/"
+
+    # 3) created fallback
+    if created and created.get("id") and created.get("slug"):
+        return {"id": created.get("id"), "slug": created.get("slug")}, "created community fallback"
+
+    return None, "no community available"
 
 
 def find_admin_candidate(
@@ -292,23 +338,36 @@ def main() -> int:
         password=os.getenv("PASSWORD", "StrongPassword123!"),
         timeout_s=int(os.getenv("TIMEOUT_S", "20")),
         smoke_twitch=os.getenv("SMOKE_TWITCH", "https://twitch.tv/handofblood"),
+        testcommunity_slug=os.getenv("TESTCOMMUNITY_SLUG", "testcommunity"),
     )
 
     cfg.username, cfg.email = make_unique_identity(cfg.username, cfg.email)
 
     results: List[StepResult] = []
 
-    print("=== Smoke Communities (existing-first) ===")
-    print(f"BASE_URL:  {cfg.base_url}")
-    print(f"USERNAME:  {cfg.username}")
-    print(f"EMAIL:     {cfg.email}")
-    print(f"TWITCH:    {cfg.smoke_twitch}\n")
+    print("=== Smoke Communities (testcommunity fallback) ===")
+    print(f"BASE_URL:         {cfg.base_url}")
+    print(f"USERNAME:         {cfg.username}")
+    print(f"EMAIL:            {cfg.email}")
+    print(f"TWITCH:           {cfg.smoke_twitch}")
+    print(f"TESTCOMMUNITY:    {cfg.testcommunity_slug}\n")
 
     run_step(results, "Register", lambda: register_user(cfg))
 
     token = run_step(results, "Login", lambda: login(cfg))
     if not token:
-        for name in ["List communities", "Create community", "Select community", "Get by slug", "Patch by id", "Join", "Me communities", "Leave"]:
+        for name in [
+            "List communities",
+            "Create community (optional)",
+            "Select community",
+            "Selected community info",
+            "Get by slug",
+            "Patch by id",
+            "Join",
+            "Me communities",
+            "Me communities returns list",
+            "Leave",
+        ]:
             mark_skip(results, name, "Skipped because Login failed")
         return summarize(results)
 
@@ -317,26 +376,38 @@ def main() -> int:
     # Create is optional (may be skipped if Twitch not configured)
     created = run_step(results, "Create community (optional)", lambda: create_community(cfg, token))
     if created is None:
-        # If the step failed with an exception, it's already marked FAIL.
-        # If Twitch is missing, create_community returns None -> mark SKIP explicitly if step was OK.
         last = results[-1]
         if last.name == "Create community (optional)" and last.status == "OK":
             last.status = "SKIP"
             last.detail = "Skipped because Twitch client credentials are not configured (or create disabled)"
 
-    # Select an EXISTING community first; fallback to created
-    selected = pick_existing_community_from_list(list_data) or created
-    if not selected:
-        mark_skip(results, "Select community", "No existing communities and no created community available")
-        for name in ["Get by slug", "Patch by id", "Join", "Me communities", "Leave"]:
+    selected_tuple = run_step(
+        results,
+        "Select community",
+        lambda: select_target_community(cfg, token, list_data, created if isinstance(created, dict) else None),
+    )
+
+    if not selected_tuple or not isinstance(selected_tuple, tuple):
+        for name in ["Selected community info", "Get by slug", "Patch by id", "Join", "Me communities", "Me communities returns list", "Leave"]:
             mark_skip(results, name, "Skipped because no community is available")
         return summarize(results)
 
-    mark_skip(results, "Select community", f"Using community id={selected.get('id')} slug={selected.get('slug')}") \
-        if False else results.append(StepResult(name="Select community", status="OK", detail=f"id={selected.get('id')} slug={selected.get('slug')}"))
+    selected, reason = selected_tuple
+    if not selected:
+        for name in ["Selected community info", "Get by slug", "Patch by id", "Join", "Me communities", "Me communities returns list", "Leave"]:
+            mark_skip(results, name, f"Skipped: {reason}")
+        return summarize(results)
+
+    results.append(
+        StepResult(
+            name="Selected community info",
+            status="OK",
+            detail=f"Using id={selected.get('id')} slug={selected.get('slug')} ({reason})",
+        )
+    )
 
     community_id = int(selected["id"])
-    slug = selected["slug"]
+    slug = str(selected["slug"])
 
     detail = run_step(results, "Get by slug", lambda: get_community_by_slug(cfg, slug, token))
     if isinstance(detail, dict):
@@ -350,24 +421,15 @@ def main() -> int:
     else:
         run_step(results, "Patch by id", lambda: patch_community(cfg, token, int(admin_target["id"])))
 
-    # Join/Leave should operate on the selected existing community (not necessarily created)
+    # Join/Leave should operate on the selected community (testcommunity preferred)
     run_step(results, "Join", lambda: join_community(cfg, token, community_id))
+
     mine = run_step(results, "Me communities", lambda: me_communities(cfg, token))
-    if isinstance(mine, list):
-        results.append(
-            StepResult(
-                name="Me communities returns list",
-                status="OK",
-            )
-        )
-    else:
-        results.append(
-            StepResult(
-                name="Me communities returns list",
-                status="FAIL",
-                detail="Expected list response from /me/communities/",
-            )
-        )
+
+    def _assert_me_list() -> None:
+        if not isinstance(mine, list):
+            raise SmokeFail("Expected list response from /me/communities/")
+    run_step(results, "Me communities returns list", _assert_me_list)
 
     run_step(results, "Leave", lambda: leave_community(cfg, token, community_id))
 
@@ -376,3 +438,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
